@@ -9,75 +9,138 @@
  * and handle auth, scaling, and resilience.
  */
 
-import http from 'http';
-import fs from 'fs';
-import path from 'path';
-import { dirname } from 'path';
-import { fileURLToPath } from 'url';
-import { Server } from 'socket.io';
+import { createServer } from "http";
+import { Server } from "socket.io";
+import fs from "fs";
+import path from "path";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+// Prisma client - generated client lives in src/generated/prisma
+import { PrismaClient } from "../src/generated/prisma/index.js";
+const prisma = new PrismaClient();
 
-const PORT = process.env.SOCKET_PORT || 4000;
+// Transcription worker (mock)
+import { transcribeSession } from "./transcription-worker.js";
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Socket server running');
+const httpServer = createServer();
+
+const io = new Server(httpServer, {
+  cors: {
+    origin: "http://localhost:3000",
+    methods: ["GET", "POST"],
+  },
 });
 
-const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
+const TMP_ROOT = path.resolve(process.cwd(), "tmp", "sessions");
+
+function ensureDirSync(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+httpServer.listen(4000, () => {
+  console.log("Socket server listening on port 4000");
+});
+
+// Basic HTTP API for sessions so the Next app can fetch session data
+// without importing the Prisma client (avoids bundler issues).
+httpServer.on('request', async (req, res) => {
+  try {
+    if (req.url === '/sessions' && req.method === 'GET') {
+      res.setHeader('Content-Type', 'application/json');
+      const sessions = await prisma.session.findMany({ orderBy: { createdAt: 'desc' } });
+      const results = await Promise.all(
+        sessions.map(async (s) => {
+          const chunks = await prisma.transcriptChunk.findMany({ where: { sessionId: s.id }, orderBy: { index: 'asc' } });
+          const summaries = await prisma.summary.findMany({ where: { sessionId: s.id }, orderBy: { createdAt: 'desc' } });
+          return { session: s, chunks, summaries };
+        })
+      );
+      res.end(JSON.stringify({ ok: true, data: results }));
+      return;
+    }
+  } catch (err) {
+    console.error('socket-server /sessions error', err);
+    res.statusCode = 500;
+    res.end(JSON.stringify({ ok: false, error: String(err) }));
+    return;
   }
 });
 
-io.on('connection', (socket) => {
-  console.log('client connected', socket.id);
+io.on("connection", (socket) => {
+  console.log("client connected", socket.id);
 
-  socket.on('start-session', ({ sessionId }) => {
-    const base = path.join(__dirname, '..', 'tmp', 'sessions', sessionId);
-    fs.mkdirSync(base, { recursive: true });
-    socket.join(sessionId);
-    socket.data.sessionId = sessionId;
-    socket.data.chunkIndex = 0;
-    console.log(`session ${sessionId} started`);
-    io.to(sessionId).emit('status', { status: 'recording' });
-  });
-
-  // Receive binary ArrayBuffer or Buffer from clients
-  socket.on('audio-chunk', (payload) => {
-    const sessionId = socket.data.sessionId || 'unknown';
-    const idx = socket.data.chunkIndex || 0;
-    const base = path.join(__dirname, '..', 'tmp', 'sessions', sessionId);
+  socket.on("start-session", async ({ sessionId }) => {
     try {
-      // payload may be ArrayBuffer or Buffer; normalize to Buffer
-      const buf = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
-      const filename = path.join(base, `chunk-${String(idx).padStart(4, '0')}.webm`);
-      fs.writeFileSync(filename, buf);
-      socket.data.chunkIndex = idx + 1;
-      socket.emit('chunk-received', { index: idx });
+      console.log("start-session", sessionId);
+      const sessionDir = path.join(TMP_ROOT, sessionId);
+      ensureDirSync(sessionDir);
+
+      // create a session row in the database (anonymous for now)
+      await prisma.session.create({
+        data: {
+          id: sessionId,
+          title: `Session ${sessionId}`,
+          status: "RECORDING",
+        },
+      });
+
+      socket.emit("session-started", { sessionId });
     } catch (err) {
-      console.error('failed to write chunk', err);
-      socket.emit('error', { message: 'failed to store chunk' });
+      console.error("start-session error", err);
+      socket.emit("error", { message: "start-session failed" });
     }
   });
 
-  socket.on('end-session', ({ sessionId }) => {
-    console.log(`session ${sessionId} ended`);
-    io.to(sessionId).emit('status', { status: 'processing' });
-    // Placeholder: in production, trigger aggregation/transcription pipeline here
-    setTimeout(() => {
-      io.to(sessionId).emit('status', { status: 'completed', downloadUrl: `/tmp/sessions/${sessionId}` });
-    }, 1000);
+  socket.on("audio-chunk", async ({ sessionId, seq, blob, filename }) => {
+    try {
+      // blob is expected to be ArrayBuffer transferred from client
+      const sessionDir = path.join(TMP_ROOT, sessionId);
+      ensureDirSync(sessionDir);
+      const seqStr = String(seq).padStart(4, "0");
+      const outName = filename || `chunk-${seqStr}.webm`;
+      const filepath = path.join(sessionDir, outName);
+      const buf = Buffer.from(blob);
+      await fs.promises.writeFile(filepath, buf);
+      console.log(`wrote chunk ${outName} for session ${sessionId}`);
+
+      // persist chunk metadata to DB (text will be filled by worker)
+      await prisma.transcriptChunk.create({
+        data: {
+          sessionId: sessionId,
+          filename: outName,
+          index: seq,
+          text: null,
+        },
+      });
+
+      socket.emit("chunk-saved", { sessionId, seq, filename: outName });
+    } catch (err) {
+      console.error("audio-chunk error", err);
+      socket.emit("error", { message: "audio-chunk failed" });
+    }
   });
 
-  socket.on('disconnect', (reason) => {
-    console.log('client disconnected', socket.id, reason);
+  socket.on("end-session", async ({ sessionId }) => {
+    try {
+      console.log("end-session", sessionId);
+      // mark session as processing
+      await prisma.session.update({ where: { id: sessionId }, data: { status: "PROCESSING" } });
+
+      socket.emit("session-ended", { sessionId });
+
+      // fire-and-forget transcription worker (mock for now)
+      transcribeSession(sessionId)
+        .then(() => {
+          console.log("transcription complete for", sessionId);
+          io.emit("transcription-complete", { sessionId });
+        })
+        .catch((err) => {
+          console.error("transcription worker failed", err);
+          io.emit("transcription-error", { sessionId, error: String(err) });
+        });
+    } catch (err) {
+      console.error("end-session error", err);
+      socket.emit("error", { message: "end-session failed" });
+    }
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Socket server listening on port ${PORT}`);
-});
