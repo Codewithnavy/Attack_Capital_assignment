@@ -1,0 +1,8 @@
+src/generated/**
+generated/**
+tmp/**
+.env*
+.vercel/**
+.next/**
+node_modules/**
+server/**/*.js

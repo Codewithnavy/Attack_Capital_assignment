@@ -1,0 +1,67 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Application schema for ScribeAI
+enum SessionStatus {
+  RECORDING
+  PAUSED
+  PROCESSING
+  COMPLETED
+  CANCELLED
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  sessions  Session[]
+}
+
+model Session {
+  id         String         @id @default(uuid())
+  userId     String?
+  user       User?          @relation(fields: [userId], references: [id])
+  title      String?
+  startedAt  DateTime       @default(now())
+  endedAt    DateTime?
+  status     SessionStatus  @default(RECORDING)
+  chunks     TranscriptChunk[]
+  summary    Summary?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+}
+
+model TranscriptChunk {
+  id         String   @id @default(uuid())
+  sessionId  String
+  session    Session  @relation(fields: [sessionId], references: [id])
+  chunkIndex Int
+  startMs    Int?
+  endMs      Int?
+  text       String   @db.Text
+  createdAt  DateTime @default(now())
+
+  @@index([sessionId, chunkIndex])
+}
+
+model Summary {
+  id        String   @id @default(uuid())
+  sessionId String   @unique
+  session   Session  @relation(fields: [sessionId], references: [id])
+  text      String   @db.Text
+  createdAt DateTime @default(now())
+}
+

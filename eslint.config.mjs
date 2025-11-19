@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Ignore generated clients and temporary session data
+    "src/generated/**",
+    "tmp/**",
+    ".env*",
   ]),
 ]);
 
