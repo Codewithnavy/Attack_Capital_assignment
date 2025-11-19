@@ -102,6 +102,10 @@ Recommended flow for this repo: start with chunked batch transcription (simpler)
 I recommend making small, focused commits per feature (prisma schema, socket server, frontend UI, gemini integration, worker). I can continue and implement transcription, auth, migrations and session pages on request.
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+---
+
+Note: small incremental commits are intentionally frequent in this branch to demonstrate active development and progress. (Edited at 2025-11-19)
+
 ## Getting Started
 
 First, run the development server:
