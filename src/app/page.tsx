@@ -17,6 +17,8 @@ export default function Home() {
   const [source, setSource] = useState<"mic" | "tab">("mic");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [chunksSent, setChunksSent] = useState(0);
+  const [seq, setSeq] = useState(0);
+  const [sessions, setSessions] = useState<any[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const socketRef = useRef<Socket | null>(null);
 
@@ -33,6 +35,21 @@ export default function Home() {
     return () => {
       socket.disconnect();
     };
+  }, []);
+
+  // fetch session history
+  const fetchSessions = async () => {
+    try {
+      const res = await fetch("/api/sessions");
+      const data = await res.json();
+      if (data.ok) setSessions(data.data);
+    } catch (err) {
+      console.warn("failed to fetch sessions", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchSessions();
   }, []);
 
   const startRecording = async () => {
@@ -71,10 +88,11 @@ export default function Home() {
       setStatus("recording");
 
       recorder.ondataavailable = (ev: BlobEvent) => {
-        // Send chunk as ArrayBuffer to the socket server
+        // Send chunk as ArrayBuffer to the socket server along with metadata
         ev.data.arrayBuffer().then((arrayBuffer) => {
-          // socket.io client supports ArrayBuffer/binary directly
-          socketRef.current?.emit("audio-chunk", arrayBuffer);
+          const seqNow = seq + 1;
+          setSeq(seqNow);
+          socketRef.current?.emit("audio-chunk", { sessionId: id, seq: seqNow, blob: arrayBuffer });
           setChunksSent((s) => s + 1);
         });
       };
@@ -94,6 +112,8 @@ export default function Home() {
     }
     if (sessionId) {
       socketRef.current?.emit("end-session", { sessionId });
+      // refresh sessions after a short delay so the worker can write results
+      setTimeout(() => fetchSessions(), 1200);
     }
     setStatus("processing");
   };
@@ -149,6 +169,33 @@ export default function Home() {
             <li>Tab audio uses getDisplayMedia to capture system/tab audio (browser support varies).</li>
             <li>On stop, server aggregates chunks and runs transcription/summarization (pipeline not yet implemented).</li>
           </ul>
+        </section>
+
+        <section className="pt-6 border-t border-white/5">
+          <h2 className="text-lg font-medium">Session History</h2>
+          <div className="mt-3 space-y-3">
+            {sessions.length === 0 ? (
+              <div className="text-sm text-white/60">No sessions yet</div>
+            ) : (
+              sessions.map((row: any) => (
+                <div key={row.session.id} className="p-3 bg-white/3 rounded-md">
+                  <div className="flex justify-between">
+                    <div>
+                      <div className="font-medium">{row.session.title}</div>
+                      <div className="text-xs text-white/70">{row.session.id} — {new Date(row.session.createdAt).toLocaleString()}</div>
+                    </div>
+                    <div className="text-sm text-white/80">{row.session.status}</div>
+                  </div>
+                  <div className="mt-2 text-sm text-white/80">
+                    Chunks: {row.chunks.length} — Summaries: {row.summaries.length}
+                    {row.summaries.length > 0 && (
+                      <div className="mt-2 p-2 bg-white/5 rounded">{row.summaries[0].text}</div>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         </section>
       </main>
     </div>
