@@ -12,19 +12,40 @@ import { io, type Socket } from "socket.io-client";
  * This file is intentionally commented to be educational and easy to extend.
  */
 
+type Chunk = {
+  id: string;
+  sessionId: string;
+  filename: string;
+  index: number;
+  text: string | null;
+  createdAt: string;
+};
+
+type Summary = {
+  sessionId: string;
+  text: string;
+  createdAt: string;
+};
+
+type SessionRow = {
+  session: { id: string; title: string; status: string; createdAt: string };
+  chunks: Chunk[];
+  summaries: Summary[];
+};
+
 export default function Home() {
   const [status, setStatus] = useState("idle");
   const [source, setSource] = useState<"mic" | "tab">("mic");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [chunksSent, setChunksSent] = useState(0);
   const [seq, setSeq] = useState(0);
-  const [sessions, setSessions] = useState<any[]>([]);
+  const [sessions, setSessions] = useState<SessionRow[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-    // connect to socket server when component mounts
-    const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:4000");
+      // connect to socket server when component mounts (default port 4001 matches server SOCKET_PORT)
+    const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:4001");
     socket.on("connect", () => {
       console.log("connected to socket", socket.id);
     });
@@ -45,6 +66,43 @@ export default function Home() {
       if (data.ok) setSessions(data.data);
     } catch (err) {
       console.warn("failed to fetch sessions", err);
+    }
+  };
+
+  const exportSession = async (sessionId: string, format: 'txt' | 'srt' | 'json') => {
+    try {
+      const url = `/api/sessions/${encodeURIComponent(sessionId)}/export?format=${format}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        console.warn('export failed', res.status);
+        return;
+      }
+      const ct = res.headers.get('content-type') || '';
+      if (format === 'json' || ct.includes('application/json')) {
+        const json = await res.json();
+        const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+        const href = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = href;
+        a.download = `session-${sessionId}.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(href);
+        return;
+      }
+      const text = await res.text();
+      const blob = new Blob([text], { type: ct || 'text/plain' });
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = `session-${sessionId}.${format === 'srt' ? 'srt' : format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(href);
+    } catch (err) {
+      console.error('exportSession error', err);
     }
   };
 
@@ -177,7 +235,7 @@ export default function Home() {
             {sessions.length === 0 ? (
               <div className="text-sm text-white/60">No sessions yet</div>
             ) : (
-              sessions.map((row: any) => (
+              sessions.map((row: SessionRow) => (
                 <div key={row.session.id} className="p-3 bg-white/3 rounded-md">
                   <div className="flex justify-between">
                     <div>
@@ -191,6 +249,13 @@ export default function Home() {
                     {row.summaries.length > 0 && (
                       <div className="mt-2 p-2 bg-white/5 rounded">{row.summaries[0].text}</div>
                     )}
+
+                    <div className="mt-3 flex gap-2">
+                      <a className="text-xs text-blue-300 underline" href={`/api/sessions/${encodeURIComponent(row.session.id)}`}>View</a>
+                      <button className="text-xs px-2 py-1 bg-white/5 rounded" onClick={() => exportSession(row.session.id, 'txt')}>Export TXT</button>
+                      <button className="text-xs px-2 py-1 bg-white/5 rounded" onClick={() => exportSession(row.session.id, 'srt')}>Export SRT</button>
+                      <button className="text-xs px-2 py-1 bg-white/5 rounded" onClick={() => exportSession(row.session.id, 'json')}>Export JSON</button>
+                    </div>
                   </div>
                 </div>
               ))

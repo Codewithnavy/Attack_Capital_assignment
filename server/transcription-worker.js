@@ -1,9 +1,47 @@
 import fs from "fs/promises";
 import path from "path";
-import { PrismaClient } from "../src/generated/prisma/index.js";
 
-const prisma = new PrismaClient();
 const TMP_ROOT = path.resolve(process.cwd(), "tmp", "sessions");
+const DB_FILE = path.resolve(process.cwd(), "tmp", "db.json");
+
+async function readDb() {
+  try {
+    const txt = await fs.readFile(DB_FILE, "utf8");
+    return JSON.parse(txt);
+  } catch (e) {
+    return { sessions: [], chunks: [], summaries: [] };
+  }
+}
+
+async function writeDb(obj) {
+  await fs.mkdir(path.dirname(DB_FILE), { recursive: true });
+  await fs.writeFile(DB_FILE, JSON.stringify(obj, null, 2), "utf8");
+}
+
+async function updateChunkText(sessionId, filename, text) {
+  const db = await readDb();
+  for (let c of db.chunks) {
+    if (c.sessionId === sessionId && c.filename === filename) {
+      c.text = text;
+    }
+  }
+  await writeDb(db);
+}
+
+async function createSummary(summary) {
+  const db = await readDb();
+  db.summaries.unshift(summary);
+  await writeDb(db);
+}
+
+async function updateSession(sessionId, patch) {
+  const db = await readDb();
+  const idx = db.sessions.findIndex((s) => s.id === sessionId);
+  if (idx !== -1) {
+    db.sessions[idx] = { ...db.sessions[idx], ...patch };
+    await writeDb(db);
+  }
+}
 
 /**
  * Mock transcription worker.
@@ -34,10 +72,7 @@ export async function transcribeSession(sessionId) {
       const text = `Transcribed (mock) for ${filename} — size ${stats.size} bytes`;
 
       // update TranscriptChunk entry by filename
-      await prisma.transcriptChunk.updateMany({
-        where: { sessionId: sessionId, filename: filename },
-        data: { text },
-      });
+      await updateChunkText(sessionId, filename, text);
 
       transcripts.push(text);
     }
@@ -46,26 +81,20 @@ export async function transcribeSession(sessionId) {
     const summaryText = `Summary (mock): ${transcripts.length} chunks processed.`;
 
     // create a summary row
-    await prisma.summary.create({
-      data: {
-        sessionId: sessionId,
-        text: summaryText,
-      },
-    });
+    await createSummary({ sessionId: sessionId, text: summaryText, createdAt: new Date().toISOString() });
 
     // mark session completed and attach simple transcript in the session record
-    await prisma.session.update({
-      where: { id: sessionId },
-      data: { status: "COMPLETED", transcript: aggregate },
-    });
+    await updateSession(sessionId, { status: "COMPLETED", transcript: aggregate });
 
     return { success: true };
   } catch (err) {
     console.error("transcribeSession failed", err);
     // mark session errored
     try {
-      await prisma.session.update({ where: { id: sessionId }, data: { status: "ERROR" } });
-    } catch (_) {}
+      await updateSession(sessionId, { status: "ERROR" });
+    } catch (e) {
+      console.error('failed to mark session ERROR in JSON DB', e);
+    }
     throw err;
   }
 }
