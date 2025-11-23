@@ -1,9 +1,25 @@
 import { spawn } from 'child_process';
-import fetch from 'node-fetch';
+// Use global fetch available in Node 18+/20+ runtime
 
 // Start the socket server as a child process, wait for listening log, then probe /health and /sessions
 const SERVER_FILE = './server/socket-server.js';
-const PORT = process.env.SOCKET_PORT || '4001';
+
+// Find an available port by asking the OS (listen on 0), then close and use it.
+import net from 'net';
+
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, () => {
+      const addr = srv.address();
+      const p = (addr && typeof addr === 'object') ? addr.port : addr;
+      srv.close(() => resolve(String(p)));
+    });
+    srv.on('error', reject);
+  });
+}
+
+let PORT = process.env.SOCKET_PORT || null;
 
 function waitForServer(child, timeout = 10000) {
   return new Promise((resolve, reject) => {
@@ -27,6 +43,13 @@ function waitForServer(child, timeout = 10000) {
 }
 
 (async () => {
+  try {
+    if (!PORT) PORT = await getFreePort();
+  } catch (e) {
+    console.error('failed to acquire free port', e && e.message ? e.message : e);
+    process.exit(2);
+  }
+
   const child = spawn(process.execPath, [SERVER_FILE], {
     env: { ...process.env, SOCKET_PORT: PORT },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -54,7 +77,7 @@ function waitForServer(child, timeout = 10000) {
     process.exit(0);
   } catch (e) {
     console.error('smoke-socket error', e && e.message ? e.message : e);
-    try { child.kill(); } catch (er) {}
+    try { child.kill(); } catch (err) { /* ignore */ }
     process.exit(2);
   }
 })();
