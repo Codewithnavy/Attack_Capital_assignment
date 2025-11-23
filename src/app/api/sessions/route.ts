@@ -8,9 +8,29 @@ export async function GET(request: Request) {
     const incoming = new URL(request.url);
     // incoming.pathname is like /api/sessions or /api/sessions/<rest>
     const suffix = incoming.pathname.replace(/^\/api/, "") || "/sessions";
-    const target = `http://localhost:${port}${suffix}${incoming.search}`;
 
-    const res = await fetch(target, { headers: { accept: "application/json" } });
+    // Try multiple hostnames in case DNS or hosts resolves differently on Windows.
+    const hosts = ["localhost", "127.0.0.1"];
+    let res: Response | null = null;
+    let lastError: unknown = null;
+    const auth = request.headers.get('authorization') || request.headers.get('Authorization') || undefined;
+    for (const host of hosts) {
+      const target = `http://${host}:${port}${suffix}${incoming.search}`;
+      try {
+        const headers: Record<string, string> = { accept: "application/json" };
+        if (auth) headers.authorization = auth;
+        res = await fetch(target, { headers });
+        break;
+      } catch (e) {
+        // capture and try next
+        lastError = e;
+        console.warn(`/api/sessions proxy: failed to fetch ${target}`, String(e));
+      }
+    }
+    if (!res) {
+      console.error('/api/sessions proxy failed (all hosts)', lastError);
+      return NextResponse.json({ ok: false, error: 'socket server unreachable on port ' + port }, { status: 502 });
+    }
     if (!res.ok) {
       const text = await res.text();
       console.error('/api/sessions proxy error', res.status, text);

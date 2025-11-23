@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { io, type Socket } from "socket.io-client";
 
 /**
@@ -40,39 +40,88 @@ export default function Home() {
   const [chunksSent, setChunksSent] = useState(0);
   const [seq, setSeq] = useState(0);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [token, setToken] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [transcribeResult, setTranscribeResult] = useState<Record<string, unknown> | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-      // connect to socket server when component mounts (default port 4001 matches server SOCKET_PORT)
-    const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:4001");
-    socket.on("connect", () => {
-      console.log("connected to socket", socket.id);
-    });
-    socket.on("status", (payload: { status: string }) => {
-      setStatus(payload.status);
-    });
-    socketRef.current = socket;
+    // Mint a short-lived dev token from the socket server, then connect using it.
+    const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:4001";
+    let mounted = true;
+
+    async function init() {
+      try {
+        const userId = `browser-${crypto.randomUUID().slice(0, 6)}`;
+        const tokenRes = await fetch(`/api/dev/token?userId=${encodeURIComponent(userId)}`);
+        const tokenJson = await tokenRes.json();
+        const t = tokenJson?.token;
+        if (mounted && t) setToken(t);
+
+        const socket = io(socketUrl, { auth: { token: t } });
+        const localToken = t;
+        socket.on("connect", () => {
+          console.log("connected to socket", socket.id);
+          setErrorMsg(null);
+        });
+        socket.on("connect_error", (err) => {
+          console.warn('socket connect_error', String(err));
+          setErrorMsg(String(err));
+        });
+        socket.on("error", (payload) => {
+          console.warn('socket error', payload);
+          const payloadMsg = payload && typeof payload === 'object' && 'message' in (payload as Record<string, unknown>) ? String((payload as Record<string, unknown>)['message']) : String(payload);
+          setErrorMsg(payloadMsg);
+        });
+        socket.on("status", (payload: { status: string }) => {
+          setStatus(payload.status);
+        });
+        socket.on('transcription-complete', async () => {
+          // refresh sessions when a transcription completes (use localToken captured at connect)
+          try {
+            const headers: Record<string,string> = { accept: 'application/json' };
+            if (localToken) headers.authorization = `Bearer ${localToken}`;
+            const res = await fetch('/api/sessions', { headers });
+            const data = await res.json().catch(() => null);
+            if (data && data.ok) setSessions(data.data);
+          } catch (e) {
+            console.warn('failed to refresh sessions after transcription-complete', e);
+          }
+        });
+        socketRef.current = socket;
+      } catch (err) {
+        console.warn('failed to mint token or connect socket', err);
+      }
+    }
+
+    init();
+
     return () => {
-      socket.disconnect();
+      mounted = false;
+      socketRef.current?.disconnect();
     };
   }, []);
 
   // fetch session history
-  const fetchSessions = async () => {
+  const fetchSessions = useCallback(async () => {
     try {
-      const res = await fetch("/api/sessions");
+      const headers: Record<string,string> = { accept: 'application/json' };
+      if (token) headers.authorization = `Bearer ${token}`;
+      const res = await fetch("/api/sessions", { headers });
       const data = await res.json();
       if (data.ok) setSessions(data.data);
     } catch (err) {
       console.warn("failed to fetch sessions", err);
     }
-  };
+  }, [token]);
 
   const exportSession = async (sessionId: string, format: 'txt' | 'srt' | 'json') => {
     try {
       const url = `/api/sessions/${encodeURIComponent(sessionId)}/export?format=${format}`;
-      const res = await fetch(url);
+      const headers: Record<string,string> = {};
+      if (token) headers.authorization = `Bearer ${token}`;
+      const res = await fetch(url, { headers });
       if (!res.ok) {
         console.warn('export failed', res.status);
         return;
@@ -106,9 +155,36 @@ export default function Home() {
     }
   };
 
+  const runTranscribeTest = async (sessionId?: string) => {
+    try {
+      setTranscribeResult(null);
+      const sid = sessionId || sessionIdStateOrFirst();
+      if (!sid) return setTranscribeResult({ ok: false, error: 'no sessionId available' });
+      const res = await fetch('/api/dev/transcribe-test', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ sessionId: sid }),
+      });
+      const j = await res.json().catch(() => ({}));
+      setTranscribeResult(j as Record<string, unknown>);
+      // refresh sessions list after run
+      setTimeout(() => fetchSessions(), 800);
+      return j;
+    } catch (err) {
+      setTranscribeResult({ ok: false, error: String(err) });
+      return { ok: false, error: String(err) };
+    }
+  };
+
+  const sessionIdStateOrFirst = () => {
+    if (sessionId) return sessionId;
+    if (sessions && sessions.length > 0) return sessions[0].session.id;
+    return null;
+  };
+
   useEffect(() => {
     fetchSessions();
-  }, []);
+  }, [fetchSessions]);
 
   const startRecording = async () => {
     try {
@@ -219,7 +295,6 @@ export default function Home() {
             <div>Chunks sent: {chunksSent}</div>
           </div>
         </section>
-
         <section className="pt-4 border-t border-white/5">
           <h2 className="text-lg font-medium">Notes</h2>
           <ul className="list-disc pl-5 text-sm text-white/80">
@@ -227,6 +302,29 @@ export default function Home() {
             <li>Tab audio uses getDisplayMedia to capture system/tab audio (browser support varies).</li>
             <li>On stop, server aggregates chunks and runs transcription/summarization (pipeline not yet implemented).</li>
           </ul>
+        </section>
+
+        <section className="pt-4 border-t border-white/5">
+          <h2 className="text-lg font-medium">Developer</h2>
+          <div className="mt-3 p-3 bg-white/3 rounded-md text-sm text-white/80">
+            <div className="mb-2">Token: <code className="bg-black/50 px-2 py-0.5 rounded">{token ?? 'not fetched'}</code></div>
+            <div className="flex gap-2 mb-2">
+              <button
+                className="px-2 py-1 bg-white/5 rounded text-xs"
+                onClick={() => navigator.clipboard?.writeText(token ?? '')}
+              >Copy Token</button>
+              <button
+                className="px-2 py-1 bg-white/5 rounded text-xs"
+                onClick={() => runTranscribeTest(sessionIdStateOrFirst() ?? undefined)}
+              >Run /api/dev/transcribe-test</button>
+            </div>
+            {errorMsg && <div className="text-xs text-red-300 mb-2">Socket error: {errorMsg}</div>}
+            {transcribeResult && (
+              <div className="text-xs bg-black/20 p-2 rounded mt-2">
+                <pre className="whitespace-pre-wrap">{JSON.stringify(transcribeResult, null, 2)}</pre>
+              </div>
+            )}
+          </div>
         </section>
 
         <section className="pt-6 border-t border-white/5">

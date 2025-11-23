@@ -1,3 +1,76 @@
+# Live-scribe Prototype (Attack Capital Assignment)
+
+This repository is a prototype live-scribing app: client records audio, streams chunks to a Node socket server which stores chunk files and runs a (mock) transcription worker. The Next.js app proxies API calls to the socket server to avoid bundling server-only libraries into the frontend.
+
+Quick start (development)
+
+1. Install dependencies
+
+```powershell
+npm install
+```
+
+2. Run both servers (recommended)
+
+```powershell
+# Starts socket server (port 4001) and Next dev (port 3000) together
+npm run dev:all
+```
+
+3. Run servers separately
+
+Socket server (foreground):
+
+```powershell
+npm run start:socket
+# or: cross-env SOCKET_PORT=4001 node server/socket-server.js
+```
+
+Next dev (foreground):
+
+```powershell
+npm run dev
+# or: cross-env NEXT_DISABLE_ESLINT=1 next dev -p 3000
+```
+
+API endpoints
+
+- Socket server (direct): `http://localhost:4001/sessions` — list sessions
+- Socket server export: `http://localhost:4001/sessions/:id/export?format=txt|srt|json`
+- Next proxy: `http://localhost:3000/api/sessions` — forwards to socket server
+
+Notes
+
+- The project ships a lightweight JSON-backed dev-store at `tmp/db.json`. This is a development shim used to avoid requiring a Postgres instance / Prisma runtime while iterating locally. For production, swap the server to use `@prisma/client` and a proper Postgres DB.
+- `src/generated/prisma` contains generated Prisma artifacts that can cause ESLint and bundler noise. The dev workflow avoids importing these files into the Next app routes. Consider moving generated client out of `src/` or excluding it from the app build in CI.
+
+Optional: real transcription
+
+The transcription worker currently uses a mock implementation by default. To enable a real transcription/generative client, set the environment flag and provide an API key (supported env vars):
+
+```powershell
+# enable real transcription (opt-in)
+setx ENABLE_REAL_TRANSCRIPTION 1
+setx GOOGLE_API_KEY "<your-key>"
+```
+
+The worker will attempt to lazy-load `@google/generative-ai` and use the provided key; if not configured properly it will fall back to the mock worker.
+
+Troubleshooting
+
+- If you get `EADDRINUSE` errors, ensure no other process is listening on ports `3000` / `4001` and stop any leftover `node` processes.
+- If Next dev shows large ESLint output from generated files, the dev script sets `NEXT_DISABLE_ESLINT=1` to avoid aborting development builds; fix generated code or move it out of `src/` to permanently silence it.
+
+What's next
+
+- Clean up or relocate generated Prisma client to remove lint/bundle issues.
+- Replace mock transcription with a configured real transcription provider (requires keys).
+- Add authentication and session ownership controls.
+
+If you'd like, I can:
+- Add a `dev:both` script that runs both servers in the foreground with combined logs.
+- Move `src/generated/prisma` to a non-app folder to reduce tooling noise.
+- Wire a specific transcription provider (Google or OpenAI) once you provide credentials.
 # ScribeAI — AI-powered Live Scribing Prototype
 
 This repository contains a Next.js 14 (App Router) prototype for ScribeAI — a real-time meeting scribing app that captures microphone or tab/screen audio, streams chunked audio to a Node Socket.io server for downstream transcription, and stores session data in Postgres via Prisma.

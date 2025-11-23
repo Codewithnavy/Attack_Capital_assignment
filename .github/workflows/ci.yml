@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install
+        run: npm ci
+      - name: Run smoke test (transcription mock)
+        env:
+          # Ensure we do not attempt real provider calls in CI
+          ENABLE_REAL_TRANSCRIPTION: '0'
+        run: |
+          echo "Running smoke transcription (mock)"
+          npm run test:smoke

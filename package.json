@@ -4,11 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "SET NEXT_DISABLE_ESLINT=1 && next dev",
+    "dev": "cross-env NEXT_DISABLE_ESLINT=1 next dev -p 3001",
+    "dev:all": "concurrently -k \"npm: start:socket\" \"npm: dev\"",
+    "dev:both": "concurrently --raw \"npm: start:socket\" \"npm: dev\"",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "start:socket": "node server/socket-server.js"
+    "test:smoke": "node server/run-transcribe.js 418da986-27c1-4aa0-a7e7-90f59470c100",
+    "start:socket": "cross-env SOCKET_PORT=4001 node server/socket-server.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -17,6 +20,7 @@
     "clsx": "^2.1.1",
     "lucide-react": "^0.554.0",
     "next": "16.0.3",
+    "openai": "^6.9.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "socket.io": "^4.8.1",
@@ -25,11 +29,12 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "cross-env": "^7.0.3",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^9.2.1",
+    "cross-env": "^7.0.3",
     "eslint": "^9",
     "eslint-config-next": "16.0.3",
     "prisma": "^7.0.0",

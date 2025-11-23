@@ -13,6 +13,7 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import fs from "fs";
 import path from "path";
+import { verifyToken, createToken } from "./auth.js";
 
 // Use installed @prisma/client at runtime for Node server processes.
 // Importing the generated client in Next app routes caused bundler issues;
@@ -87,7 +88,12 @@ const httpServer = createServer();
 
 const io = new Server(httpServer, {
   cors: {
-    origin: "http://localhost:3000",
+    origin: [
+      "http://localhost:3000",
+      "http://localhost:3001",
+      "http://127.0.0.1:3000",
+      "http://127.0.0.1:3001",
+    ],
     methods: ["GET", "POST"],
   },
 });
@@ -121,6 +127,8 @@ httpServer.listen(SOCKET_PORT, () => {
   console.log(`Socket server listening on port ${SOCKET_PORT}`);
 });
 
+const REQUIRE_AUTH = process.env.SOCKET_REQUIRE_AUTH === '1' || process.env.SOCKET_REQUIRE_AUTH === 'true';
+
 // Surface uncaught errors to console so the process doesn't silently exit
 process.on('uncaughtException', (err) => {
   console.error('uncaughtException in socket-server', err);
@@ -146,9 +154,20 @@ httpServer.on('request', async (req, res) => {
       // GET /sessions -> list
       if (u.pathname === '/sessions' && req.method === 'GET') {
         res.setHeader('Content-Type', 'application/json');
+        // If Authorization header provided, filter sessions to that owner
+        const auth = (req.headers && (req.headers.authorization || req.headers.Authorization)) || null;
+        let ownerId = null;
+        if (auth && typeof auth === 'string') {
+          const m = auth.match(/^Bearer\s+(.+)$/i);
+          const token = m ? m[1] : auth;
+          const obj = verifyToken(token);
+          if (obj && obj.userId) ownerId = obj.userId;
+        }
+
         const sessions = await dbFindSessions();
+        const filtered = ownerId ? sessions.filter((s) => s.ownerId === ownerId) : sessions;
         const results = await Promise.all(
-          sessions.map(async (s) => {
+          filtered.map(async (s) => {
             const chunks = await dbFindChunks(s.id);
             const summaries = await dbFindSummaries(s.id);
             return { session: s, chunks, summaries };
@@ -232,6 +251,36 @@ httpServer.on('request', async (req, res) => {
         return;
       }
 
+          // Dev token mint endpoint - POST JSON { userId, ttl }
+          if (u.pathname === '/dev/token' && (req.method === 'POST' || req.method === 'GET')) {
+            try {
+              // support GET /dev/token?userId=foo&ttl=3600 for convenience
+              if (req.method === 'GET') {
+                const userId = u.searchParams.get('userId') || `dev-${Math.random().toString(36).slice(2,8)}`;
+                const ttl = u.searchParams.get('ttl') ? Number(u.searchParams.get('ttl')) : undefined;
+                const token = createToken({ userId }, ttl);
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ ok: true, token, userId }));
+                return;
+              }
+
+              // POST: read JSON body
+              let body = '';
+              for await (const chunk of req) body += chunk;
+              const parsed = body ? JSON.parse(body) : {};
+              const userId = parsed.userId || `dev-${Math.random().toString(36).slice(2,8)}`;
+              const ttl = parsed.ttl ? Number(parsed.ttl) : undefined;
+              const token = createToken({ userId }, ttl);
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ ok: true, token, userId }));
+              return;
+            } catch (e) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ ok: false, error: String(e) }));
+              return;
+            }
+          }
+
     
   } catch (err) {
     console.error('socket-server /sessions error', err);
@@ -241,20 +290,53 @@ httpServer.on('request', async (req, res) => {
   }
 });
 
+// Socket auth middleware: if client provides a token via `handshake.auth.token` or
+// `Authorization: Bearer <token>` header, verify and attach the payload to `socket.data.user`.
+io.use((socket, next) => {
+  try {
+    const hs = socket.handshake || {};
+    let token = null;
+    if (hs.auth && typeof hs.auth.token === 'string') token = hs.auth.token;
+    if (!token && hs.headers && (hs.headers.authorization || hs.headers.Authorization)) {
+      const raw = hs.headers.authorization || hs.headers.Authorization;
+      const m = String(raw).match(/^Bearer\s+(.+)$/i);
+      token = m ? m[1] : raw;
+    }
+    if (token) {
+      const obj = verifyToken(token);
+      if (obj) socket.data.user = obj;
+      else console.warn('socket auth: token invalid for socket', socket.id);
+    }
+    if (REQUIRE_AUTH && !socket.data.user) {
+      console.warn('socket auth: rejecting connection (auth required) for', socket.id);
+      return next(new Error('unauthorized'));
+    }
+  } catch (e) {
+    console.warn('socket auth middleware error', e);
+  }
+  return next();
+});
+
 io.on("connection", (socket) => {
   console.log("client connected", socket.id);
 
   socket.on("start-session", async ({ sessionId }) => {
     try {
       console.log("start-session", sessionId);
+      if (REQUIRE_AUTH && !(socket.data && socket.data.user)) {
+        socket.emit('error', { message: 'unauthorized' });
+        return;
+      }
       const sessionDir = path.join(TMP_ROOT, sessionId);
       ensureDirSync(sessionDir);
 
       // create a session record in the lightweight DB
+      const ownerId = socket.data && socket.data.user && socket.data.user.userId ? socket.data.user.userId : null;
       await dbCreateSession({
         id: sessionId,
         title: `Session ${sessionId}`,
         status: "RECORDING",
+        ownerId,
         createdAt: new Date().toISOString(),
       });
 
@@ -267,6 +349,10 @@ io.on("connection", (socket) => {
 
   socket.on("audio-chunk", async ({ sessionId, seq, blob, filename }) => {
     try {
+      if (REQUIRE_AUTH && !(socket.data && socket.data.user)) {
+        socket.emit('error', { message: 'unauthorized' });
+        return;
+      }
       // blob is expected to be ArrayBuffer transferred from client
       const sessionDir = path.join(TMP_ROOT, sessionId);
       ensureDirSync(sessionDir);
@@ -304,6 +390,10 @@ io.on("connection", (socket) => {
   socket.on("end-session", async ({ sessionId }) => {
     try {
       console.log("end-session", sessionId);
+      if (REQUIRE_AUTH && !(socket.data && socket.data.user)) {
+        socket.emit('error', { message: 'unauthorized' });
+        return;
+      }
   // mark session as processing in lightweight DB
   await dbUpdateSessionStatus(sessionId, "PROCESSING");
 
