@@ -28,3 +28,9 @@ jobs:
         run: |
           echo "Running socket HTTP smoke test"
           npm run test:socket
+      - name: Run worker end-to-end test
+        env:
+          ENABLE_REAL_TRANSCRIPTION: '1'
+        run: |
+          echo "Running worker end-to-end test (local proxy)"
+          npm run test:worker
