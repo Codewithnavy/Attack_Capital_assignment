@@ -24,3 +24,7 @@ jobs:
         run: |
           echo "Running smoke transcription (mock)"
           npm run test:smoke
+      - name: Run socket HTTP smoke test
+        run: |
+          echo "Running socket HTTP smoke test"
+          npm run test:socket
