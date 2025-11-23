@@ -1,5 +1,3 @@
-import fetch from 'node-fetch';
-
 const PORT = process.env.SOCKET_PORT || '4001';
 const SESSION_ID = process.env.SESSION_ID || '1cfb8f41-6e9d-4da4-98d8-0e03be51a995';
 
