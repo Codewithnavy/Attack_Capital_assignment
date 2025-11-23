@@ -12,6 +12,7 @@
     "lint": "eslint",
     "test:smoke": "node server/run-transcribe.js 418da986-27c1-4aa0-a7e7-90f59470c100",
     "test:socket": "node tests/smoke-socket.js",
+    "test:worker": "node tests/worker-transcribe.js",
     "start:socket": "cross-env SOCKET_PORT=4001 node server/socket-server.js"
   },
   "dependencies": {
