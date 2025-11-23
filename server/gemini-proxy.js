@@ -1,57 +1,52 @@
-import express from 'express';
-import bodyParser from 'body-parser';
-import fetch from 'node-fetch';
-
-const app = express();
-app.use(bodyParser.json({ limit: '50mb' }));
+import { createServer } from 'http';
 
 const PORT = process.env.PORT || process.env.GEMINI_PROXY_PORT || 4010;
 const UPSTREAM = process.env.GEMINI_UPSTREAM_URL || process.env.GEMINI_TRANSCRIBE_URL_UPSTREAM || null;
 const API_KEY = process.env.GEMINI_API_KEY || process.env.GENERATIVE_AI_KEY || null;
 
-app.post('/transcribe', async (req, res) => {
-  try {
-    const body = req.body || {};
-    const audio = body.audio && body.audio.content;
-    const bufLen = audio ? Buffer.from(audio, 'base64').length : 0;
+function jsonResponse(res, status, obj) {
+  const b = JSON.stringify(obj);
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(b) });
+  res.end(b);
+}
 
-    if (UPSTREAM && API_KEY) {
-      // forward to upstream provider
-      try {
-        const r = await fetch(UPSTREAM, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${API_KEY}`
-          },
-          body: JSON.stringify(body)
-        });
-        const j = await r.json().catch(() => null);
-        // Normalize common shapes
-        if (j && typeof j === 'object') {
-          if (j.transcript || j.text || j.outputText) return res.json({ transcript: j.transcript || j.text || j.outputText });
-          if (j.results && j.results[0] && j.results[0].alternatives && j.results[0].alternatives[0] && j.results[0].alternatives[0].transcript) {
-            return res.json({ transcript: j.results[0].alternatives[0].transcript });
+const server = createServer(async (req, res) => {
+  try {
+    if (req.method === 'GET' && req.url === '/health') return jsonResponse(res, 200, { ok: true });
+
+    if (req.method === 'POST' && req.url === '/transcribe') {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      if (!body) return jsonResponse(res, 400, { error: 'missing body' });
+      let parsed;
+      try { parsed = JSON.parse(body); } catch (e) { return jsonResponse(res, 400, { error: 'invalid json' }); }
+      const audio = parsed.audio && parsed.audio.content;
+      const bufLen = audio ? Buffer.from(audio, 'base64').length : 0;
+
+      if (UPSTREAM && API_KEY) {
+        try {
+          const r = await fetch(UPSTREAM, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` }, body: JSON.stringify(parsed) });
+          const j = await r.json().catch(() => null);
+          if (j && typeof j === 'object') {
+            if (j.transcript || j.text || j.outputText) return jsonResponse(res, 200, { transcript: j.transcript || j.text || j.outputText });
+            if (j.results && j.results[0] && j.results[0].alternatives && j.results[0].alternatives[0] && j.results[0].alternatives[0].transcript) return jsonResponse(res, 200, { transcript: j.results[0].alternatives[0].transcript });
+            if (j.candidates && j.candidates[0] && j.candidates[0].content) return jsonResponse(res, 200, { transcript: String(j.candidates[0].content) });
           }
-          if (j.candidates && j.candidates[0] && j.candidates[0].content) {
-            return res.json({ transcript: String(j.candidates[0].content) });
-          }
+          return jsonResponse(res, 200, { transcript: JSON.stringify(j) });
+        } catch (e) {
+          return jsonResponse(res, 502, { error: 'upstream failed', detail: String(e) });
         }
-        return res.json({ transcript: JSON.stringify(j) });
-      } catch (e) {
-        return res.status(502).json({ error: 'upstream failed', detail: String(e) });
       }
+
+      return jsonResponse(res, 200, { transcript: `Synthetic transcript for ${bufLen} bytes (proxy)` });
     }
 
-    // Default: synthetic transcript for local testing
-    return res.json({ transcript: `Synthetic transcript for ${bufLen} bytes (proxy)` });
+    jsonResponse(res, 404, { error: 'not found' });
   } catch (e) {
-    return res.status(500).json({ error: String(e) });
+    jsonResponse(res, 500, { error: String(e) });
   }
 });
 
-app.get('/health', (req, res) => res.json({ ok: true }));
-
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`gemini-proxy listening on ${PORT} (UPSTREAM=${UPSTREAM ? 'set' : 'none'})`);
 });
