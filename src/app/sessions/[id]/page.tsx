@@ -87,10 +87,14 @@ export default function SessionPage() {
         )}
       </div>
 
-      <div className="mb-4 flex gap-2">
-        <button className="px-3 py-1 bg-white/5 rounded" onClick={() => exportSession('txt')}>Export TXT</button>
-        <button className="px-3 py-1 bg-white/5 rounded" onClick={() => exportSession('srt')}>Export SRT</button>
-        <button className="px-3 py-1 bg-white/5 rounded" onClick={() => exportSession('json')}>Export JSON</button>
+      <div className="mb-4 flex gap-2 items-center">
+        <button className="px-3 py-1 bg-white/5 rounded disabled:opacity-50" disabled={loading} onClick={() => exportSession('txt')}>Export TXT</button>
+        <a className="px-3 py-1 bg-white/5 rounded" href={`/api/sessions/${encodeURIComponent(id)}/export?format=txt`} target="_blank" rel="noreferrer">Open TXT</a>
+        <button className="px-3 py-1 bg-white/5 rounded disabled:opacity-50" disabled={loading} onClick={() => exportSession('srt')}>Export SRT</button>
+        <a className="px-3 py-1 bg-white/5 rounded" href={`/api/sessions/${encodeURIComponent(id)}/export?format=srt`} target="_blank" rel="noreferrer">Open SRT</a>
+        <button className="px-3 py-1 bg-white/5 rounded disabled:opacity-50" disabled={loading} onClick={() => exportSession('json')}>Export JSON</button>
+        <a className="px-3 py-1 bg-white/5 rounded" href={`/api/sessions/${encodeURIComponent(id)}/export?format=json`} target="_blank" rel="noreferrer">Open JSON</a>
+        <button className="px-2 py-1 ml-2 border rounded text-sm" onClick={() => navigator.clipboard?.writeText(`${location.origin}/api/sessions/${encodeURIComponent(id)}/export?format=json`).then(()=>alert('Export URL copied'))}>Copy JSON URL</button>
       </div>
 
       <section className="mb-6">
