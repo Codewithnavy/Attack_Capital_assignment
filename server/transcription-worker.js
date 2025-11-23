@@ -151,6 +151,44 @@ export async function transcribeSession(sessionId) {
             }
 
             if (audioBuf) {
+              // Helper: try a direct HTTP-based transcription endpoint if configured.
+              const tryHttpTranscribe = async (url, key, buf) => {
+                try {
+                  const b64 = Buffer.from(buf).toString('base64');
+                  const body = JSON.stringify({
+                    audio: { content: b64 },
+                    config: { encoding: 'WEBM_OPUS', languageCode: process.env.TRANSCRIPTION_LANG || 'en-US' }
+                  });
+                  const resp = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      Authorization: `Bearer ${key}`
+                    },
+                    body
+                  }).catch(() => null);
+                  if (!resp) return null;
+                  const json = await resp.json().catch(() => null);
+                  if (!json) return null;
+                  // Try common response shapes
+                  if (typeof json.transcript === 'string') return json.transcript;
+                  if (json.results && json.results[0] && json.results[0].alternatives && json.results[0].alternatives[0] && json.results[0].alternatives[0].transcript) {
+                    return String(json.results[0].alternatives[0].transcript);
+                  }
+                  if (json.outputText) return String(json.outputText);
+                  if (json.text) return String(json.text);
+                  if (json.candidates && json.candidates[0] && json.candidates[0].content) {
+                    // generative responses sometimes return nested content
+                    const c = json.candidates[0].content;
+                    if (Array.isArray(c) && c[0] && c[0].text) return String(c[0].text);
+                    if (typeof c === 'string') return c;
+                  }
+                  return null;
+                } catch (e) {
+                  return null;
+                }
+              };
+
               // Try a few candidate APIs in order, guarded in try/catch
               // 1) If client exposes a method to accept raw audio (e.g., transcribe, recognize)
               try {
@@ -184,6 +222,21 @@ export async function transcribeSession(sessionId) {
                     text = String(resp.candidates[0].content).slice(0, 2000);
                   } else if (resp && resp.text) {
                     text = String(resp.text).slice(0, 2000);
+                  }
+                }
+              } catch (e) {
+                /* ignore */
+              }
+
+              // 4) If user configured a direct Gemini-compatible HTTP transcription endpoint,
+              //    attempt to POST the audio as base64 to that URL using `GEMINI_TRANSCRIBE_URL`.
+              try {
+                const httpUrl = process.env.GEMINI_TRANSCRIBE_URL || process.env.GENERATIVE_TRANSCRIBE_URL;
+                const apiKey = process.env.GEMINI_API_KEY || process.env.GENERATIVE_AI_KEY || process.env.GOOGLE_API_KEY;
+                if (!text && httpUrl && apiKey) {
+                  const hres = await tryHttpTranscribe(httpUrl, apiKey, audioBuf);
+                  if (hres) {
+                    text = String(hres).slice(0, 2000);
                   }
                 }
               } catch (e) {
